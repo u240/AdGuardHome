@@ -15,8 +15,8 @@ import (
 	"github.com/AdguardTeam/AdGuardHome/internal/version"
 	"github.com/AdguardTeam/golibs/httphdr"
 	"github.com/AdguardTeam/golibs/log"
-	"github.com/AdguardTeam/golibs/mathutil"
 	"github.com/AdguardTeam/golibs/netutil"
+	"github.com/AdguardTeam/golibs/netutil/urlutil"
 	"github.com/NYTimes/gziphandler"
 )
 
@@ -129,10 +129,10 @@ func handleStatus(w http.ResponseWriter, r *http.Request) {
 		protectionDisabledUntil *time.Time
 		protectionEnabled       bool
 	)
-	if Context.dnsServer != nil {
+	if globalContext.dnsServer != nil {
 		fltConf = &dnsforward.Config{}
-		Context.dnsServer.WriteDiskConfig(fltConf)
-		protectionEnabled, protectionDisabledUntil = Context.dnsServer.UpdatedProtectionStatus()
+		globalContext.dnsServer.WriteDiskConfig(fltConf)
+		protectionEnabled, protectionDisabledUntil = globalContext.dnsServer.UpdatedProtectionStatus()
 	}
 
 	var resp statusResponse
@@ -145,10 +145,7 @@ func handleStatus(w http.ResponseWriter, r *http.Request) {
 			// Make sure that we don't send negative numbers to the frontend,
 			// since enough time might have passed to make the difference less
 			// than zero.
-			protectionDisabledDuration = mathutil.Max(
-				0,
-				time.Until(*protectionDisabledUntil).Milliseconds(),
-			)
+			protectionDisabledDuration = max(0, time.Until(*protectionDisabledUntil).Milliseconds())
 		}
 
 		resp = statusResponse{
@@ -165,7 +162,7 @@ func handleStatus(w http.ResponseWriter, r *http.Request) {
 
 	// IsDHCPAvailable field is now false by default for Windows.
 	if runtime.GOOS != "windows" {
-		resp.IsDHCPAvailable = Context.dhcpServer != nil
+		resp.IsDHCPAvailable = globalContext.dhcpServer != nil
 	}
 
 	aghhttp.WriteJSONResponseOK(w, r, resp)
@@ -175,7 +172,7 @@ func handleStatus(w http.ResponseWriter, r *http.Request) {
 // registration of handlers
 // ------------------------
 func registerControlHandlers(web *webAPI) {
-	Context.mux.HandleFunc(
+	globalContext.mux.HandleFunc(
 		"/control/version.json",
 		postInstall(optionalAuth(web.handleVersionJSON)),
 	)
@@ -188,19 +185,19 @@ func registerControlHandlers(web *webAPI) {
 	httpRegister(http.MethodPut, "/control/profile/update", handlePutProfile)
 
 	// No auth is necessary for DoH/DoT configurations
-	Context.mux.HandleFunc("/apple/doh.mobileconfig", postInstall(handleMobileConfigDoH))
-	Context.mux.HandleFunc("/apple/dot.mobileconfig", postInstall(handleMobileConfigDoT))
+	globalContext.mux.HandleFunc("/apple/doh.mobileconfig", postInstall(handleMobileConfigDoH))
+	globalContext.mux.HandleFunc("/apple/dot.mobileconfig", postInstall(handleMobileConfigDoT))
 	RegisterAuthHandlers()
 }
 
 func httpRegister(method, url string, handler http.HandlerFunc) {
 	if method == "" {
 		// "/dns-query" handler doesn't need auth, gzip and isn't restricted by 1 HTTP method
-		Context.mux.HandleFunc(url, postInstall(handler))
+		globalContext.mux.HandleFunc(url, postInstall(handler))
 		return
 	}
 
-	Context.mux.Handle(url, postInstallHandler(optionalAuthHandler(gziphandler.GzipHandler(ensureHandler(method, handler)))))
+	globalContext.mux.Handle(url, postInstallHandler(optionalAuthHandler(gziphandler.GzipHandler(ensureHandler(method, handler)))))
 }
 
 // ensure returns a wrapped handler that makes sure that the request has the
@@ -226,8 +223,8 @@ func ensure(
 				return
 			}
 
-			Context.controlLock.Lock()
-			defer Context.controlLock.Unlock()
+			globalContext.controlLock.Lock()
+			defer globalContext.controlLock.Unlock()
 		}
 
 		handler(w, r)
@@ -296,7 +293,7 @@ func ensureHandler(method string, handler func(http.ResponseWriter, *http.Reques
 // preInstall lets the handler run only if firstRun is true, no redirects
 func preInstall(handler func(http.ResponseWriter, *http.Request)) func(http.ResponseWriter, *http.Request) {
 	return func(w http.ResponseWriter, r *http.Request) {
-		if !Context.firstRun {
+		if !globalContext.firstRun {
 			// if it's not first run, don't let users access it (for example /install.html when configuration is done)
 			http.Error(w, http.StatusText(http.StatusForbidden), http.StatusForbidden)
 			return
@@ -323,7 +320,7 @@ func preInstallHandler(handler http.Handler) http.Handler {
 // HTTPS-related headers.  If proceed is true, the middleware must continue
 // handling the request.
 func handleHTTPSRedirect(w http.ResponseWriter, r *http.Request) (proceed bool) {
-	web := Context.web
+	web := globalContext.web
 	if web.httpsServer.server == nil {
 		return true
 	}
@@ -380,7 +377,7 @@ func handleHTTPSRedirect(w http.ResponseWriter, r *http.Request) (proceed bool) 
 	//
 	// See https://developer.mozilla.org/en-US/docs/Web/HTTP/Headers/Access-Control-Allow-Origin.
 	originURL := &url.URL{
-		Scheme: aghhttp.SchemeHTTP,
+		Scheme: urlutil.SchemeHTTP,
 		Host:   r.Host,
 	}
 
@@ -399,7 +396,7 @@ func httpsURL(u *url.URL, host string, portHTTPS uint16) (redirectURL *url.URL) 
 	}
 
 	return &url.URL{
-		Scheme:   aghhttp.SchemeHTTPS,
+		Scheme:   urlutil.SchemeHTTPS,
 		Host:     hostPort,
 		Path:     u.Path,
 		RawQuery: u.RawQuery,
@@ -412,7 +409,7 @@ func httpsURL(u *url.URL, host string, portHTTPS uint16) (redirectURL *url.URL) 
 func postInstall(handler func(http.ResponseWriter, *http.Request)) func(http.ResponseWriter, *http.Request) {
 	return func(w http.ResponseWriter, r *http.Request) {
 		path := r.URL.Path
-		if Context.firstRun && !strings.HasPrefix(path, "/install.") &&
+		if globalContext.firstRun && !strings.HasPrefix(path, "/install.") &&
 			!strings.HasPrefix(path, "/assets/") {
 			http.Redirect(w, r, "install.html", http.StatusFound)
 

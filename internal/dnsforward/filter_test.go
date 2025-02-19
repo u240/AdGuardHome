@@ -9,6 +9,7 @@ import (
 	"github.com/AdguardTeam/AdGuardHome/internal/filtering"
 	"github.com/AdguardTeam/dnsproxy/proxy"
 	"github.com/AdguardTeam/dnsproxy/upstream"
+	"github.com/AdguardTeam/golibs/logutil/slogutil"
 	"github.com/AdguardTeam/golibs/netutil"
 	"github.com/miekg/dns"
 	"github.com/stretchr/testify/assert"
@@ -31,10 +32,12 @@ func TestHandleDNSRequest_handleDNSRequest(t *testing.T) {
 		UDPListenAddrs: []*net.UDPAddr{{}},
 		TCPListenAddrs: []*net.TCPAddr{{}},
 		Config: Config{
+			UpstreamMode: UpstreamModeLoadBalance,
 			EDNSClientSubnet: &EDNSClientSubnet{
 				Enabled: false,
 			},
 		},
+		ServePlainDNS: true,
 	}
 	filters := []filtering.Filter{{
 		ID: 0, Data: []byte(rules),
@@ -55,6 +58,7 @@ func TestHandleDNSRequest_handleDNSRequest(t *testing.T) {
 		},
 		DNSFilter:   f,
 		PrivateNets: netutil.SubnetSetFunc(netutil.IsLocallyServed),
+		Logger:      slogutil.NewDiscardLogger(),
 	})
 	require.NoError(t, err)
 
@@ -186,7 +190,7 @@ func TestHandleDNSRequest_handleDNSRequest(t *testing.T) {
 		dctx := &proxy.DNSContext{
 			Proto: proxy.ProtoUDP,
 			Req:   tc.req,
-			Addr:  &net.UDPAddr{IP: net.IP{127, 0, 0, 1}, Port: 1},
+			Addr:  testClientAddrPort,
 		}
 
 		t.Run(tc.name, func(t *testing.T) {
@@ -227,6 +231,7 @@ func TestHandleDNSRequest_filterDNSResponse(t *testing.T) {
 		DHCPServer:  &testDHCP{},
 		DNSFilter:   f,
 		PrivateNets: netutil.SubnetSetFunc(netutil.IsLocallyServed),
+		Logger:      slogutil.NewDiscardLogger(),
 	})
 	require.NoError(t, err)
 
@@ -325,7 +330,7 @@ func TestHandleDNSRequest_filterDNSResponse(t *testing.T) {
 				Proto: proxy.ProtoUDP,
 				Req:   tc.req,
 				Res:   resp,
-				Addr:  &net.UDPAddr{IP: net.IP{127, 0, 0, 1}, Port: 1},
+				Addr:  testClientAddrPort,
 			}
 
 			dctx := &dnsContext{
